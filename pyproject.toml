@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multiagents-debate-writer"
+version = "0.1.0"
+description = "Sistema de geracao de artigos em Markdown com LangGraph, AutoGen e OpenAI."
+readme = "README.md"
+requires-python = ">=3.11,<4.0"
+dependencies = [
+    "langgraph>=0.2.56",
+    "openai>=1.52.0",
+    "autogen-agentchat>=0.4.7",
+    "autogen-ext[openai]>=0.4.7",
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.9.2",
+    "pytest>=8.3.3",
+]
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider -p no:tmpdir"
+norecursedirs = [".pytest_tmp", "__pycache__", "pytest-cache-files-*", ".artifacts"]

@@ -1,0 +1,220 @@
+Metadata-Version: 2.4
+Name: multiagents-debate-writer
+Version: 0.1.0
+Summary: Sistema de geracao de artigos em Markdown com LangGraph, AutoGen e OpenAI.
+Requires-Python: <4.0,>=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: langgraph>=0.2.56
+Requires-Dist: openai>=1.52.0
+Requires-Dist: autogen-agentchat>=0.4.7
+Requires-Dist: autogen-ext[openai]>=0.4.7
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: pydantic>=2.9.2
+Requires-Dist: pytest>=8.3.3
+
+# Multiagents Debate Writer
+
+Sistema em Python para geracao de artigos em Markdown a partir de uma solicitacao do usuario, usando `LangGraph` como orquestrador principal, `AutoGen` como engine interna do debate e `OpenAI Responses API` para intake, pesquisa, sintese e redacao final.
+
+## Visao geral
+
+O objetivo do projeto e produzir artigos mais robustos do que um pipeline linear comum. Em vez de gerar texto diretamente apos a pesquisa, o fluxo passa por um debate estruturado entre tres agentes com papeis complementares:
+
+- `Analitico`: organiza o raciocinio e a estrutura.
+- `Critico`: tensiona exageros, riscos e lacunas.
+- `Estrategico`: amplia contexto e relevancia pratica.
+
+O debate nao e decorativo: ele alimenta a sintese editorial e influencia o outline e o artigo final.
+
+## Arquitetura
+
+### Principios
+
+- `LangGraph` controla estado, fluxo, repeticao e persistencia.
+- `AutoGen` fica encapsulado em `app/debate/autogen_runner.py`.
+- O restante do sistema conversa com o debate apenas pelo contrato `DebateEngine.run(...)`.
+- Tudo roda em um unico processo Python.
+- A pesquisa e modular para futura troca de backend.
+
+### Fluxo
+
+```text
+Usuario
+  -> orchestrator_intake
+  -> research_node
+  -> debate_node
+  -> debate_node (opcional, via edge condicional)
+  -> synthesis_node
+  -> writer_node
+  -> save_file_node
+  -> outputs/artigo_final.md
+```
+
+### Estrutura de pastas
+
+```text
+multiagents_debate_writer/
+|- app/
+|  |- graph/
+|  |  |- state.py
+|  |  |- nodes.py
+|  |  |- build_graph.py
+|  |  `- edges.py
+|  |- debate/
+|  |  |- autogen_runner.py
+|  |  |- agents.py
+|  |  |- prompts.py
+|  |  `- formatter.py
+|  |- research/
+|  |  |- web_search.py
+|  |  |- parser.py
+|  |  `- summarizer.py
+|  |- writer/
+|  |  |- outline.py
+|  |  |- article_writer.py
+|  |  `- markdown_saver.py
+|  |- llm/
+|  |  |- openai_client.py
+|  |  `- models.py
+|  `- main.py
+|- outputs/
+|  `- artigo_final.md
+|- tests/
+|  |- test_graph.py
+|  |- test_debate.py
+|  `- test_writer.py
+|- .env.example
+|- pyproject.toml
+`- README.md
+```
+
+## Configuracao
+
+Copie `.env.example` para `.env` e ajuste os valores:
+
+```env
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_MODEL=gpt-4.1-mini
+OUTPUT_PATH=outputs/artigo_final.md
+RESEARCH_MAX_SOURCES=6
+DEBATE_MIN_ROUNDS=3
+DEBATE_MAX_ROUNDS=5
+LLM_TEMPERATURE=0.3
+LOG_LEVEL=INFO
+LOG_STYLE=utf8_blocks
+ARTICLE_PROFILE=academic_rigid
+ARTICLE_MIN_WORDS=60000
+EVIDENCE_POLICY=abort
+```
+
+## Instalacao
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
+```
+
+## Como rodar
+
+No diretorio `multiagents_debate_writer/`:
+
+```bash
+python -m app.main --request "Crie um artigo sobre inteligencia artificial"
+```
+
+Opcionalmente, sobrescreva o caminho de saida:
+
+```bash
+python -m app.main --request "Crie um artigo sobre inteligencia artificial" --output-path outputs/ia.md
+```
+
+Para aumentar a verbosidade dos logs no terminal:
+
+```bash
+python -m app.main --request "Crie um artigo sobre inteligencia artificial" --log-level DEBUG
+```
+
+Se quiser trocar o estilo de log por ambiente:
+
+```bash
+set LOG_STYLE=utf8_blocks
+python -m app.main --request "Crie um artigo sobre inteligencia artificial"
+```
+
+## Como funciona
+
+### 1. orchestrator_intake
+
+Interpreta a solicitacao do usuario e define:
+
+- request normalizada
+- objetivo editorial
+- publico-alvo
+- tom
+- restricoes
+- queries de pesquisa
+- prompt base do debate
+
+### 2. research_node
+
+Usa `OpenAI Web Search` para pesquisar o tema, deduplicar fontes e produzir:
+
+- `research_notes`
+- `research_summary`
+- `source_references`
+- `evidence_is_sufficient`
+- `evidence_confidence`
+- `evidence_gaps`
+- `follow_up_queries`
+
+### 3. debate_node
+
+Chama `DebateEngine`, que executa o debate com `AutoGen` em rodadas:
+
+- rodada 1: tese inicial
+- rodada 2: critica cruzada
+- rodada 3: refinamento final
+
+Se ainda houver questoes em aberto, o grafo pode repetir `debate_node` ate o teto configurado.
+Durante o debate, o terminal exibe logs com a rodada, o agente, o posicionamento extraido da fala e o texto emitido por cada especialista.
+
+Se a pesquisa nao sustentar um artigo academico-profissional longo com rigor suficiente, o fluxo aborta a escrita do artigo e gera um relatorio formal de insuficiencia de evidencia.
+
+### 4. synthesis_node
+
+Consolida pesquisa + debate em um outline final coerente.
+
+### 5. writer_node
+
+Gera um artigo em Markdown com narrativa coesa, sem parecer colagem.
+
+### 6. save_file_node
+
+Cria a pasta de saida quando necessario e salva o arquivo final.
+
+## Testes
+
+Execute a suite com:
+
+```bash
+pytest
+```
+
+Os testes usam mocks/fakes para evitar chamadas reais a OpenAI e a pesquisa web.
+
+## Limitacoes atuais
+
+- O backend de pesquisa padrao depende do `web_search` da OpenAI.
+- O debate adaptativo esta limitado a no maximo 5 rodadas.
+- O CLI atual e simples e nao expoe checkpoint persistente.
+- A versao inicial produz artigo academico em Markdown ou relatorio de insuficiencia de evidencia em Markdown.
+
+## Roadmap
+
+- adicionar checkpoint/persistencia do grafo
+- suportar human-in-the-loop
+- adicionar votacao ou arbitragem entre agentes
+- suportar multiplos formatos de saida
+- suportar outros tipos de documento alem de artigo
+- incluir observabilidade e tracing mais detalhados
