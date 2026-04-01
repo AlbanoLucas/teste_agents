@@ -39,6 +39,7 @@ class OpenAIWebSearchBackend:
                 "e materiais adequados ao dominio do tema. Resuma os pontos centrais e retorne resultados com links."
             ),
             max_results=max_results,
+            operation_name=f"web_search:{query[:60]}",
         )
         return SearchResult(
             query=payload["query"],

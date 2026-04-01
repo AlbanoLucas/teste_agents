@@ -1,4 +1,4 @@
-"""Reusable OpenAI Responses API client."""
+"""Reusable OpenAI Responses API client with prompt envelopes and retry policy."""
 
 from __future__ import annotations
 
@@ -7,12 +7,25 @@ import json
 import logging
 import os
 import re
-from typing import Any, TypeVar
+from dataclasses import dataclass
+from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+
+from app.workflow.error_policy import RetryableLLMError, RetryableSearchError, SchemaValidationError
+from app.workflow.models import PromptEnvelope
 
 StructuredModelT = TypeVar("StructuredModelT", bound=BaseModel)
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class OperationPolicy:
+    """Runtime policy for a specific OpenAI operation type."""
+
+    timeout_seconds: float
+    max_retries: int
+    category: Literal["retryable_llm", "retryable_search"]
 
 
 class OpenAIResponsesClient:
@@ -25,45 +38,84 @@ class OpenAIResponsesClient:
         api_key: str | None = None,
         temperature: float = 0.3,
         client: Any | None = None,
+        operation_policies: dict[str, OperationPolicy] | None = None,
     ) -> None:
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
         self.temperature = temperature
         self._client = client or self._build_client(api_key=api_key)
+        self._operation_policies = operation_policies or {
+            "text": OperationPolicy(timeout_seconds=45.0, max_retries=2, category="retryable_llm"),
+            "structured": OperationPolicy(timeout_seconds=45.0, max_retries=2, category="retryable_llm"),
+            "web_search": OperationPolicy(timeout_seconds=30.0, max_retries=3, category="retryable_search"),
+        }
 
     def generate_text(
         self,
         *,
-        instructions: str,
-        prompt: str,
+        envelope: PromptEnvelope | None = None,
+        instructions: str | None = None,
+        prompt: str | None = None,
         temperature: float | None = None,
     ) -> str:
         """Generate free-form text for synthesis or article writing."""
 
-        response = self._client.responses.create(
-            model=self.model,
-            temperature=self.temperature if temperature is None else temperature,
-            input=self._build_input(instructions, prompt),
+        prompt_envelope = envelope or PromptEnvelope(
+            instructions=instructions or "",
+            prompt=prompt or "",
+            operation_name="text_generation",
         )
-        return self._extract_output_text(response).strip()
+        policy = self._operation_policies["text"]
+        return self._run_with_retry(
+            operation_name=prompt_envelope.operation_name,
+            policy=policy,
+            error_factory=RetryableLLMError,
+            fn=lambda: self._extract_output_text(
+                self._client.responses.create(
+                    model=self.model,
+                    temperature=self.temperature if temperature is None else temperature,
+                    input=self._build_input(prompt_envelope.instructions, prompt_envelope.prompt),
+                    timeout=policy.timeout_seconds,
+                )
+            ).strip(),
+        )
 
     def generate_structured(
         self,
         *,
-        instructions: str,
-        prompt: str,
         schema_model: type[StructuredModelT],
+        envelope: PromptEnvelope | None = None,
+        instructions: str | None = None,
+        prompt: str | None = None,
         temperature: float | None = None,
     ) -> StructuredModelT:
         """Generate a structured payload validated against a Pydantic model."""
 
-        response = self._create_structured_response(
-            instructions=instructions,
-            prompt=prompt,
-            schema_model=schema_model,
-            temperature=temperature,
+        prompt_envelope = envelope or PromptEnvelope(
+            instructions=instructions or "",
+            prompt=prompt or "",
+            operation_name=f"structured:{schema_model.__name__}",
         )
-        payload = self._extract_structured_payload(response)
-        return schema_model.model_validate(payload)
+        policy = self._operation_policies["structured"]
+        response = self._run_with_retry(
+            operation_name=prompt_envelope.operation_name,
+            policy=policy,
+            error_factory=RetryableLLMError,
+            fn=lambda: self._create_structured_response(
+                instructions=prompt_envelope.instructions,
+                prompt=prompt_envelope.prompt,
+                schema_model=schema_model,
+                temperature=temperature,
+                timeout_seconds=policy.timeout_seconds,
+            ),
+        )
+        try:
+            payload = self._extract_structured_payload(response)
+            return schema_model.model_validate(payload)
+        except (ValidationError, ValueError) as exc:
+            raise SchemaValidationError(
+                str(exc),
+                operation_name=prompt_envelope.operation_name,
+            ) from exc
 
     def web_search(
         self,
@@ -71,15 +123,23 @@ class OpenAIResponsesClient:
         query: str,
         instructions: str,
         max_results: int = 5,
+        operation_name: str = "web_search",
     ) -> dict[str, Any]:
         """Run OpenAI web search and return a normalized response payload."""
 
-        response = self._client.responses.create(
-            model=self.model,
-            temperature=0,
-            input=self._build_input(instructions, query),
-            tools=[{"type": "web_search"}],
-            include=["web_search_call.action.sources"],
+        policy = self._operation_policies["web_search"]
+        response = self._run_with_retry(
+            operation_name=operation_name,
+            policy=policy,
+            error_factory=RetryableSearchError,
+            fn=lambda: self._client.responses.create(
+                model=self.model,
+                temperature=0,
+                input=self._build_input(instructions, query),
+                tools=[{"type": "web_search"}],
+                include=["web_search_call.action.sources"],
+                timeout=policy.timeout_seconds,
+            ),
         )
         return {
             "query": query,
@@ -106,6 +166,50 @@ class OpenAIResponsesClient:
             },
         ]
 
+    def _run_with_retry(
+        self,
+        *,
+        operation_name: str,
+        policy: OperationPolicy,
+        error_factory: type[RetryableLLMError] | type[RetryableSearchError],
+        fn: Any,
+    ) -> Any:
+        attempts = policy.max_retries + 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                logger.debug(
+                    "OpenAI operation started",
+                    extra={
+                        "operation_name": operation_name,
+                        "attempt": attempt,
+                        "timeout_seconds": policy.timeout_seconds,
+                    },
+                )
+                return fn()
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "OpenAI operation failed",
+                    extra={
+                        "operation_name": operation_name,
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                    },
+                    exc_info=attempt == attempts,
+                )
+                if attempt >= attempts:
+                    raise error_factory(
+                        str(exc),
+                        operation_name=operation_name,
+                        attempt=attempt,
+                    ) from exc
+        raise error_factory(
+            str(last_exc or "OpenAI operation failed"),
+            operation_name=operation_name,
+            attempt=attempts,
+        )
+
     def _create_structured_response(
         self,
         *,
@@ -113,6 +217,7 @@ class OpenAIResponsesClient:
         prompt: str,
         schema_model: type[StructuredModelT],
         temperature: float | None = None,
+        timeout_seconds: float,
     ) -> Any:
         responses_api = self._client.responses
         parse = getattr(responses_api, "parse", None)
@@ -124,6 +229,7 @@ class OpenAIResponsesClient:
                     temperature=self.temperature if temperature is None else temperature,
                     input=self._build_input(instructions, prompt),
                     text_format=schema_model,
+                    timeout=timeout_seconds,
                 )
             except TypeError:
                 logger.debug(
@@ -135,6 +241,7 @@ class OpenAIResponsesClient:
             model=self.model,
             temperature=self.temperature if temperature is None else temperature,
             input=self._build_input(instructions, prompt),
+            timeout=timeout_seconds,
             text={
                 "format": {
                     "type": "json_schema",
@@ -394,9 +501,7 @@ class OpenAIResponsesClient:
                                 "title": str(source.get("title", source.get("name", url))),
                                 "source": str(source.get("source", source.get("domain", "web"))),
                                 "url": url,
-                                "snippet": str(
-                                    source.get("snippet", source.get("text", "")),
-                                ),
+                                "snippet": str(source.get("snippet", source.get("text", ""))),
                             }
                         )
                 for nested in value.values():

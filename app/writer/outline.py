@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.llm.models import OutlinePayload, OutlineSection, SourceReference
 from app.llm.openai_client import OpenAIResponsesClient
+from app.prompts.builders import build_outline_prompt
 
 
 class OutlineGenerator:
@@ -30,38 +31,24 @@ class OutlineGenerator:
         article_profile: str,
         minimum_words: int,
     ) -> tuple[OutlinePayload, str]:
-        prompt = (
-            f"Solicitacao normalizada: {normalized_request}\n"
-            f"Objetivo do artigo: {article_goal}\n"
-            f"Publico: {audience}\n"
-            f"Tom: {tone}\n"
-            f"Dominio do conhecimento: {knowledge_domain}\n"
-            f"Lente disciplinar: {disciplinary_lens}\n"
-            f"Perfil editorial: {article_profile}\n"
-            f"Meta minima de extensao: {minimum_words} palavras\n"
-            f"Restricoes editoriais: {', '.join(constraints) or 'Nenhuma'}\n\n"
-            "Exigencias de evidencia e rigor:\n"
-            + "\n".join(f"- {item}" for item in evidence_requirements)
-            + "\n\n"
-            f"Resumo da pesquisa:\n{research_summary}\n\n"
-            f"Resumo do debate:\n{debate_summary}\n\n"
-            "Posicoes finais dos agentes:\n"
-            + "\n".join(f"- {name}: {position}" for name, position in agent_positions.items())
-            + "\n\nFontes consideradas:\n"
-            + "\n".join(f"- {ref.title} | {ref.source} | {ref.url}" for ref in references)
+        prompt_envelope = build_outline_prompt(
+            normalized_request=normalized_request,
+            article_goal=article_goal,
+            audience=audience,
+            tone=tone,
+            knowledge_domain=knowledge_domain,
+            disciplinary_lens=disciplinary_lens,
+            evidence_requirements=evidence_requirements,
+            constraints=constraints,
+            research_summary=research_summary,
+            debate_summary=debate_summary,
+            agent_positions=agent_positions,
+            references=references,
+            article_profile=article_profile,
+            minimum_words=minimum_words,
         )
         outline = self._client.generate_structured(
-            instructions=(
-                "Voce define o outline final de um artigo academico-profissional em Markdown. "
-                "Adapte a forma do outline ao dominio informado sem perder rigor: "
-                "use estrutura de revisao cientifica para temas empiricos e estrutura de revisao academica "
-                "para temas conceituais, historicos, juridicos, sociais ou humanisticos. "
-                "O artigo deve soar profissional, denso e bem embasado, nunca como trabalho escolar. "
-                "Retorne JSON com `headline`, `editorial_angle` e `sections`. "
-                "Inclua secoes equivalentes a resumo, palavras-chave, introducao, desenvolvimento "
-                "analitico, contrapontos, limitacoes e conclusao."
-            ),
-            prompt=prompt,
+            envelope=prompt_envelope,
             schema_model=OutlinePayload,
             temperature=0.2,
         )

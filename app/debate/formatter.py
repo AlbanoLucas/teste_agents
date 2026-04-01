@@ -11,6 +11,7 @@ from app.debate.prompts import phase_label
 from app.llm.models import DebateAgentPositions, DebateAssessmentPayload, DebateTurn, ResearchNote
 from app.llm.openai_client import OpenAIResponsesClient
 from app.logging_utils import log_block, preview_text
+from app.prompts.builders import build_debate_assessment_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -79,27 +80,16 @@ class DebateFormatter:
                 completed_rounds=completed_rounds,
             )
 
-        prompt = (
-            f"Tema: {topic}\n"
-            f"Rodadas concluidas: {completed_rounds}\n\n"
-            f"Resumo da pesquisa:\n{research_summary}\n\n"
-            f"Notas de pesquisa:\n"
-            + "\n".join(
-                f"- {note.title} | {note.source} | {note.summary}" for note in research_notes
-            )
-            + "\n\nTranscript:\n"
-            + "\n".join(
-                f"- Rodada {turn.round} [{turn.phase}] {turn.agent}: {turn.message}"
-                for turn in transcript
-            )
+        prompt_envelope = build_debate_assessment_prompt(
+            topic=topic,
+            transcript=transcript,
+            research_summary=research_summary,
+            research_notes=research_notes,
+            completed_rounds=completed_rounds,
         )
         try:
             payload = self._llm_client.generate_structured(
-                instructions=(
-                    "Resuma debates editoriais multiagentes. "
-                    "Retorne JSON com `summary`, `positions`, `needs_more_rounds` e `open_questions`."
-                ),
-                prompt=prompt,
+                envelope=prompt_envelope,
                 schema_model=DebateAssessmentPayload,
                 temperature=0.2,
             )

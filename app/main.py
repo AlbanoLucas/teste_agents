@@ -10,14 +10,21 @@ from dotenv import load_dotenv
 
 from app.debate.autogen_runner import DebateEngine
 from app.graph.build_graph import build_graph
-from app.graph.nodes import WorkflowDependencies, WorkflowSettings
+from app.graph.services import WorkflowServices, WorkflowSettings
 from app.llm.openai_client import OpenAIResponsesClient
 from app.logging_utils import configure_logging
 from app.research.summarizer import ResearchSummarizer
 from app.research.web_search import OpenAIWebSearchBackend
-from app.writer.article_writer import MarkdownArticleWriter
+from app.workflow.error_policy import WorkflowErrorPolicy
+from app.workflow.section_recovery import SectionRecoveryService
+from app.workflow.section_service import SectionStateService
+from app.workflow.state_adapter import GraphStateAdapter
+from app.writer.article_assembler import ArticleAssembler
+from app.writer.formatter import MarkdownFormatter
 from app.writer.markdown_saver import MarkdownSaver
 from app.writer.outline import OutlineGenerator
+from app.writer.section_reviewer import SectionReviewer
+from app.writer.section_writer import SectionWriter
 
 
 @dataclass(slots=True)
@@ -70,24 +77,44 @@ def load_settings() -> AppSettings:
     )
 
 
-def build_dependencies(settings: AppSettings) -> WorkflowDependencies:
+def build_dependencies(settings: AppSettings) -> WorkflowServices:
     llm_client = OpenAIResponsesClient(
         model=settings.model,
         api_key=settings.api_key,
         temperature=settings.llm_temperature,
     )
-    return WorkflowDependencies(
+    formatter = MarkdownFormatter()
+    section_service = SectionStateService(formatter)
+    error_policy = WorkflowErrorPolicy()
+    search_backend = OpenAIWebSearchBackend(llm_client)
+    research_summarizer = ResearchSummarizer(llm_client)
+    debate_engine = DebateEngine(
+        model=settings.model,
+        api_key=settings.api_key,
         llm_client=llm_client,
-        search_backend=OpenAIWebSearchBackend(llm_client),
-        research_summarizer=ResearchSummarizer(llm_client),
-        debate_engine=DebateEngine(
-            model=settings.model,
-            api_key=settings.api_key,
-            llm_client=llm_client,
-        ),
+    )
+    return WorkflowServices(
+        llm_client=llm_client,
+        search_backend=search_backend,
+        research_summarizer=research_summarizer,
+        debate_engine=debate_engine,
         outline_generator=OutlineGenerator(llm_client),
-        article_writer=MarkdownArticleWriter(llm_client),
+        section_writer=SectionWriter(llm_client, formatter),
+        section_reviewer=SectionReviewer(llm_client),
+        article_assembler=ArticleAssembler(formatter),
         markdown_saver=MarkdownSaver(),
+        state_adapter=GraphStateAdapter(),
+        error_policy=error_policy,
+        section_service=section_service,
+        section_recovery=SectionRecoveryService(
+            llm_client=llm_client,
+            search_backend=search_backend,
+            research_summarizer=research_summarizer,
+            debate_engine=debate_engine,
+            error_policy=error_policy,
+            research_max_sources=settings.research_max_sources,
+            article_profile=settings.article_profile,
+        ),
         settings=WorkflowSettings(
             default_output_path=settings.output_path,
             research_max_sources=settings.research_max_sources,
@@ -124,13 +151,15 @@ def main() -> None:
     workflow = build_graph(deps)
     final_state = workflow.invoke(
         {
-            "user_request": args.request,
-            "output_path": args.output_path or settings.output_path,
-            "errors": [],
-            "metadata": {},
+            "workflow": {
+                "user_request": args.request,
+                "output_path": args.output_path or settings.output_path,
+                "errors": [],
+                "metadata": {},
+            }
         }
     )
-    print(f"Artigo salvo em: {final_state['output_path']}")
+    print(f"Artigo salvo em: {final_state['workflow']['output_path']}")
 
 
 if __name__ == "__main__":
